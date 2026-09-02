@@ -2,7 +2,7 @@
 
 A high-performance, hardware-agnostic C++ / SYCL geochemical solver backend designed for massive multi-cell parallelism on heterogeneous accelerators (GPUs, multi-core CPUs) using [AdaptiveCpp](https://github.com/AdaptiveCpp/AdaptiveCpp).
 
-The solver focuses exclusively on simulating **equilibrium (aqueous speciation, mineral precipitation/dissolution)** and **kinetic** processes across spatial cells, mirroring the physical formulation of PHREEQC and the reference Python prototype.
+The solver focuses exclusively on simulating **equilibrium (aqueous speciation, mineral precipitation/dissolution)** and **kinetic** processes across spatial cells, mirroring the physical formulation of PHREEQC.
 
 ---
 
