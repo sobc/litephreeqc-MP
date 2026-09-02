@@ -41,5 +41,7 @@ make -j$(nproc)
 ./test_verify
 
 # 4. Run parallel simulation with 10,000 cells
-./geochem_sycl -db ../../database/phreeqc_kin.dat -i ../../python/verify.pqi -n 10000
+./geochem_sycl -db ../database/phreeqc_kin.dat -i ../examples/verify.pqi -n 10000
+# (or with automatic default paths):
+./geochem_sycl -n 10000
 ```

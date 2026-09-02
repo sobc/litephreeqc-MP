@@ -58,15 +58,17 @@ The build produces three primary artifacts inside `build/`:
 ```
 
 ### Options:
-- `-db <path>`: Path to thermodynamic database file (e.g., `../../database/phreeqc_kin.dat`).
-- `-i <path>`: Path to simulation input script (e.g., `../../python/verify.pqi`).
+- `-db <path>`: Path to thermodynamic database file (default: `../database/phreeqc_kin.dat`).
+- `-i <path>`: Path to simulation input script (default: `../examples/verify.pqi`).
 - `-n <int>`: Number of cells to simulate in parallel (default: `1`).
 
 ### Examples:
 
 #### Single-Cell Run with Detailed State Output:
 ```bash
-./geochem_sycl -db ../../database/phreeqc_kin.dat -i ../../python/verify.pqi -n 1
+./geochem_sycl -db ../database/phreeqc_kin.dat -i ../examples/verify.pqi -n 1
+# or simply using defaults:
+./geochem_sycl
 ```
 *Output:*
 ```
@@ -74,8 +76,8 @@ The build produces three primary artifacts inside `build/`:
   C++ SYCL Parallel Geochemical Solver (AdaptiveCpp)
 =========================================================
 Target Device: AdaptiveCpp OpenMP host device
-Database:      ../../database/phreeqc_kin.dat
-Input Script:  ../../python/verify.pqi
+Database:      ../database/phreeqc_kin.dat
+Input Script:  ../examples/verify.pqi
 Cells Count:   1
 
 Chemical System:
@@ -109,7 +111,7 @@ Kinetics (mol):
 
 #### Massive Multi-Cell Simulation (10,000 Cells):
 ```bash
-./geochem_sycl -db ../../database/phreeqc_kin.dat -i ../../python/verify.pqi -n 10000
+./geochem_sycl -n 10000
 ```
 *Output:*
 ```

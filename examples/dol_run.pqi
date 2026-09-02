@@ -1,0 +1,32 @@
+SOLUTION 1
+    units mol/kgw
+    temp 25.0
+    pH 7.0
+    Mg 0.001
+    Cl 0.002
+    water 1.0
+
+EQUILIBRIUM_PHASES 1
+    Calcite 0.0 1.0
+
+KINETICS 1
+    Calcite
+        -m 0.000207
+        -m0 0.000207
+        -parms 0.05
+    Dolomite
+        -m 0.0
+        -m0 0.0
+        -parms 0.005
+    -steps 1000.0
+
+SELECTED_OUTPUT
+    -file dol_run.sel
+    -reset false
+    -step true
+    -time true
+    -pH true
+    -totals Ca Mg C Cl
+    -kinetics Calcite Dolomite
+
+END

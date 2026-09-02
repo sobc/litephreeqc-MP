@@ -1,0 +1,24 @@
+# Build directory
+build/
+bin/
+lib/
+
+# CMake cache and generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Object files and libraries
+*.o
+*.so
+*.a
+*.dylib
+
+# Compiled executables
+geochem_sycl
+test_verify
+
+# AdaptiveCpp JIT cache and logs
+.adaptivecpp/
+*.acpp.log

@@ -1,0 +1,26 @@
+SOLUTION 1
+    units mol/kgw
+    temp 25.0
+    pH 7.0
+    Ca 0.001
+    C 0.002
+    S 0.003
+    water 1.0
+EQUILIBRIUM_PHASES 1
+    Gypsum 0.0 0.0
+KINETICS 1
+    Calcite
+    -m 0.01
+    -m0 0.01
+    -parms 0.02
+    -steps 100.0
+SELECTED_OUTPUT
+    -file verify.sel
+    -reset false
+    -step true
+    -time true
+    -pH true
+    -totals Ca C S
+    -equilibrium Gypsum
+    -kinetics Calcite
+END

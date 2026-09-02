@@ -26,9 +26,27 @@ int main() {
     std::cout << "Device: " << q.get_device().get_info<sycl::info::device::name>() << "\n\n";
 
     std::string db_path = "database/phreeqc_kin.dat";
-    std::string pqi_path = "python/verify.pqi";
-    std::ifstream test_f(db_path);
-    if (!test_f.good()) {
+    std::string pqi_path = "examples/verify.pqi";
+
+    auto files_exist = [](const std::string& d, const std::string& p) {
+        std::ifstream fd(d);
+        std::ifstream fp(p);
+        return fd.good() && fp.good();
+    };
+
+    if (!files_exist(db_path, pqi_path)) {
+        db_path = "../database/phreeqc_kin.dat";
+        pqi_path = "../examples/verify.pqi";
+    }
+    if (!files_exist(db_path, pqi_path)) {
+        db_path = "cpp_sycl/database/phreeqc_kin.dat";
+        pqi_path = "cpp_sycl/examples/verify.pqi";
+    }
+    if (!files_exist(db_path, pqi_path)) {
+        db_path = "../../database/phreeqc_kin.dat";
+        pqi_path = "../../examples/verify.pqi";
+    }
+    if (!files_exist(db_path, pqi_path)) {
         db_path = "../../database/phreeqc_kin.dat";
         pqi_path = "../../python/verify.pqi";
     }

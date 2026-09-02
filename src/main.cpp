@@ -8,8 +8,19 @@
 
 int main(int argc, char* argv[]) {
     std::string db_path = "database/phreeqc_kin.dat";
-    std::string pqi_path = "python/verify.pqi";
+    std::string pqi_path = "examples/verify.pqi";
     int num_cells = 1;
+
+    // Default path fallback if running from build/ directory
+    auto files_exist = [](const std::string& d, const std::string& p) {
+        std::ifstream fd(d);
+        std::ifstream fp(p);
+        return fd.good() && fp.good();
+    };
+    if (!files_exist(db_path, pqi_path) && files_exist("../database/phreeqc_kin.dat", "../examples/verify.pqi")) {
+        db_path = "../database/phreeqc_kin.dat";
+        pqi_path = "../examples/verify.pqi";
+    }
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];

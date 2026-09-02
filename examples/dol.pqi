@@ -1,0 +1,41 @@
+SOLUTION 1
+    units	mol/kgw
+    water	1
+    temperature	25
+    pH	7
+    pe	4
+    Mg 0.001
+    Cl 0.002
+KINETICS 1
+    Calcite
+    -m      0.000207
+    -parms  0.05
+    -tol    1e-10
+    Dolomite
+    -m      0.0
+    -parms  0.005
+    -tol    1e-10
+END
+
+RUN_CELLS 
+    -cells 1
+    -time 10
+
+COPY solution 1 2
+
+
+SOLUTION 3
+    units	mol/kgw
+    water 1
+    temp 25 
+    Mg 0.001
+    Cl 0.002
+END
+
+SOLUTION 4
+    units mol/kgw 
+    water 1
+    temp 25
+    Mg 0.002
+    Cl 0.004
+END
