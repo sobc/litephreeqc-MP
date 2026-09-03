@@ -22,3 +22,6 @@ test_verify
 # AdaptiveCpp JIT cache and logs
 .adaptivecpp/
 *.acpp.log
+
+
+.spack-env
