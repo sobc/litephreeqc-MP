@@ -24,6 +24,7 @@ struct SystemMatrices {
     std::vector<std::string> mineral_names;
     std::vector<std::string> all_phase_names;
     std::vector<std::string> kinetics_names;
+    std::unordered_map<std::string, std::string> rates_scripts;
 
     // Species data
     std::vector<double> species_stoich_matrix; // S x E
@@ -84,19 +85,29 @@ public:
     ParallelSolverState& operator=(ParallelSolverState&& other) noexcept;
 };
 
-class BackendSolver {
+class IBackendSolver {
+public:
+    virtual ~IBackendSolver() = default;
+    virtual void initialize_grid(const SystemInput& input) = 0;
+    virtual SystemOutput run_simulation(double dt) = 0;
+    virtual bool solve_initial_equilibration(int cell_idx, bool fix_pH, double cb_target) = 0;
+    virtual ParallelSolverState& get_state() = 0;
+    virtual const SystemMatrices& get_matrices() const = 0;
+};
+
+class BackendSolver : public IBackendSolver {
 public:
     BackendSolver(sycl::queue q, const SystemMatrices& matrices);
-    ~BackendSolver();
+    ~BackendSolver() override;
 
-    void initialize_grid(const SystemInput& input);
-    SystemOutput run_simulation(double dt);
+    void initialize_grid(const SystemInput& input) override;
+    SystemOutput run_simulation(double dt) override;
 
     // Solve equilibrium for a single cell (useful for initial equilibration)
-    bool solve_initial_equilibration(int cell_idx, bool fix_pH, double cb_target);
+    bool solve_initial_equilibration(int cell_idx, bool fix_pH, double cb_target) override;
 
-    ParallelSolverState& get_state() { return *state_; }
-    const SystemMatrices& get_matrices() const { return matrices_; }
+    ParallelSolverState& get_state() override { return *state_; }
+    const SystemMatrices& get_matrices() const override { return matrices_; }
 
 private:
     sycl::queue queue_;

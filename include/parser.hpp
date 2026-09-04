@@ -30,6 +30,7 @@ public:
     std::unordered_map<std::string, double> elements_gfw;
     std::unordered_map<std::string, ParsedSpecies> species;
     std::unordered_map<std::string, ParsedPhase> phases;
+    std::unordered_map<std::string, std::string> rates_scripts; // Mineral name -> Basic script
 
     bool parse(const std::string& filepath);
 
@@ -66,7 +67,7 @@ public:
                                           const SystemMatrices& matrices,
                                           int num_cells);
 
-    static void equilibrate_initial_state(BackendSolver& solver,
+    static void equilibrate_initial_state(IBackendSolver& solver,
                                           SystemInput& input);
 };
 

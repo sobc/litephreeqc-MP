@@ -32,83 +32,68 @@ sequenceDiagram
     Device-->>App: Parallel execution at native C++ speed
 ```
 
-### 2.1 Dynamic Function Declarations ([`include/rates.hpp`](file:///mnt/nfsshare/home/mluebke/phreeqc3/cpp_sycl/include/rates.hpp))
+### 2.1 Generic RateContext Template (`include/rates.hpp`)
 
-For the AdaptiveCpp SSCP pass to resolve and inline functions at the device level, both the placeholder targets and the concrete rate functions must be declared with `SYCL_EXTERNAL inline` and made visible to the kernel translation unit:
+The rate law operates on a `geochem::RateContext<Real>` template object, allowing dynamic floating-point precision (e.g., `double` or `float`). The context provides highly optimized access to phase indices:
 
 ```cpp
-// Generic signature for all rate laws
-using RateFnPtr = double (*)(
-    double m, double m0, double tk, double time,
-    const double* parms,
-    const double* activities,
-    const double* si,
-    const double* sr,
-    const int* indices
-);
+template<typename Real>
+class RateContext {
+public:
+    Real m() const;       // Current moles
+    Real tk() const;      // Temperature in Kelvin
+    Real parm(int i) const;
+    Real si(const char* name) const;
+    Real act(const char* name) const;
+    // ...
+};
+```
 
-// Dynamic placeholder symbols (replaced by JIT compiler)
-SYCL_EXTERNAL inline double dynamic_rate_0(double m, double m0, double tk, double time,
-                                           const double* parms, const double* activities,
-                                           const double* si, const double* sr, const int* indices) {
+---
+
+## 3. The Basic-to-C++ Transpiler (`BasicTranspiler`)
+
+Previously, PHREEQC required rate laws to be written as BASIC interpreted strings inside `phreeqc_kin.dat` (e.g. `10 moles = 0`, `20 if ... goto 200`). To eliminate interpretation overhead while retaining 100% database compatibility, we integrated a real-time `BasicTranspiler`.
+
+When parsing the database, `BasicTranspiler` uses regex-based AST analysis to transpile the BASIC logic into C++ code:
+
+### Source (BASIC in database)
+```basic
+10 moles=0
+20 IF ((M<=0) and (SI("Calcite")<0)) then goto 200
+90 mech_a = 10^logK25_a * e^(-Ea_a/R*deltaT) * act("H+")
+200 save moles
+```
+
+### Transpiled (C++ SYCL)
+```cpp
+template<typename Real>
+SYCL_EXTERNAL inline Real rate_Calcite(const geochem::RateContext<Real>& ctx) {
+    Real M = 0.0, moles = 0.0, R = 0.0, mech_a = 0.0, rate = 0.0;
+    L10: moles = 0;
+    L20: if ((ctx.m()<=0) && (ctx.si("Calcite")<0)) { goto L200; }
+    // ...
+    L90: mech_a = sycl::pow(static_cast<Real>(10.0), static_cast<Real>(logK25_a)) * sycl::exp(static_cast<Real>(-Ea_a/R*deltaT)) * ctx.act("H+");
+    // ...
+    L200: return moles;
     return 0.0;
-}
-
-// Concrete rate law implementation for Calcite dissolution
-SYCL_EXTERNAL inline double rate_Calcite(double m, double m0, double tk, double time,
-                                         const double* parms, const double* activities,
-                                         const double* si, const double* sr, const int* indices) {
-    double M = m;
-    double TK = tk;
-
-    double act_H = activities[indices[0]];
-    double si_Calcite = si[indices[1]];
-    double sr_Calcite = sr[indices[1]];
-
-    // Zero dissolution if mineral is exhausted under undersaturated conditions
-    if (M <= 0.0 && si_Calcite < 0.0) return 0.0;
-
-    constexpr double R = 8.314462;
-    double deltaT = 1.0 / TK - 1.0 / 298.15;
-    constexpr double e = 2.718282;
-
-    // Mechanism 1 (acid region)
-    constexpr double Ea_a = 14400.0;
-    constexpr double logK25_a = -0.3;
-    double mech_a = sycl::pow(10.0, logK25_a) * sycl::pow(e, -Ea_a / R * deltaT) * act_H;
-
-    // Mechanism 2 (neutral / water region)
-    constexpr double Ea_c = 23500.0;
-    constexpr double logK25_c = -5.81;
-    double mech_c = sycl::pow(10.0, logK25_c) * sycl::pow(e, -Ea_c / R * deltaT);
-
-    double rate = mech_a + mech_c;
-    double moles = parms[0] * rate * (1.0 - sr_Calcite);
-    return moles * time;
 }
 ```
 
 ---
 
-## 3. Symbol Reflection & Registration ([`src/rates.cpp`](file:///mnt/nfsshare/home/mluebke/phreeqc3/cpp_sycl/src/rates.cpp))
+## 4. Kernel Specialization & Registration
 
-AdaptiveCpp requires function pointers to be mapped to their mangled LLVM symbol names. This is registered during runtime initialization:
+The `JitCompiler` generates a unique kernel wrapper that links the transpired rate functions to the placeholder endpoints (`dynamic_rate_X`) via SSCP Reflection.
 
 ```cpp
-void RateRegistry::register_reflection() {
-    hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_0);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_1);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_2);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_3);
-
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_dummy);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_Calcite);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_Dolomite);
-}
+// Auto-generated by JitCompiler
+geochem::RateRegistry::instance().register_rate("Calcite", geochem::rate_Calcite<double>);
+hipsycl::glue::reflection::enable_function_symbol_reflection(geochem::rate_Calcite<double>);
 ```
 
-### 3.1 Kernel Specialization at Launch Time ([`src/solver_backend.cpp`](file:///mnt/nfsshare/home/mluebke/phreeqc3/cpp_sycl/src/solver_backend.cpp))
 Prior to kernel submission, the solver backend binds the desired rate law to the placeholder:
+
 ```cpp
 sycl::AdaptiveCpp_jit::dynamic_function_config config;
 if (K > 0) {
@@ -117,75 +102,29 @@ if (K > 0) {
 }
 
 auto specialized_kernel = config.apply([=](sycl::id<1> item) {
-    // Inside the kernel, calling dynamic_rate_0() executes as a regular call.
-    // The JIT compiler inlines rate_Calcite() directly into this body!
-    double dm = dynamic_rate_0(cell_moles, cell_m0, temp, dt, parms, act, si, sr, indices);
-    ...
+    // LLVM SSCP JIT inlines rate_Calcite() directly into this body!
+    RateContext<double> ctx(cell_moles, cell_m0, temp, dt, parms, act, si, sr, totals, kin_moles);
+    double dm = dynamic_rate_0(ctx);
+    // ...
 });
-
-queue_.parallel_for(sycl::range<1>{N}, specialized_kernel).wait();
 ```
-
----
-
-## 4. Translating PHREEQC Basic Rate Scripts to C++
-
-In `database/phreeqc_kin.dat`, the Calcite kinetic law is defined based on Plummer et al. (1978):
-
-```basic
-Calcite
--cvode true
--start
-1 rem   parm(1) = A/V, 1/dm
-2 rem   parm(2) = exponent for (1-O)
-10  si_cc = si("Calcite")
-20  if (m <= 0 and si_cc < 0) then goto 200
-30  p1 = 100.0
-40  if (count_parm > 0) then p1 = parm(1)
-...
-100 rate = (r1 + r2 + r3) * (1 - 10^(2/3*si_cc))
-110 moles = rate * p1 * (m/m0)^0.67 * time
-200 save moles
--end
-```
-
-### Equivalent C++ Translation:
-- `parm(1)` maps directly to `parms[0]`.
-- `si("Calcite")` and `sr("Calcite")` are queried via precomputed indices `indices[1]` from the `si` and `sr` device vectors (zero string lookups!).
-- `time` represents the current adaptive sub-step size $h$ (in seconds).
-- Return value is the reacted mass $\Delta m$ in moles.
 
 ---
 
 ## 5. Guide: Adding a New Kinetic Rate Law
 
+Thanks to the `BasicTranspiler`, you **no longer need to write any C++ code**! 
 To register a new rate law (e.g., Quartz dissolution):
 
-1. **Implement the function in [`include/rates.hpp`](file:///mnt/nfsshare/home/mluebke/phreeqc3/cpp_sycl/include/rates.hpp)**:
-   ```cpp
-   SYCL_EXTERNAL inline double rate_Quartz(
-       double m, double m0, double tk, double time,
-       const double* parms, const double* activities,
-       const double* si, const double* sr, const int* indices
-   ) {
-       double si_qtz = si[indices[1]];
-       if (m <= 0.0 && si_qtz < 0.0) return 0.0;
-       // Rimstidt & Barnes (1980) rate law
-       double k = sycl::pow(10.0, -13.99); // mol/m2/s at 25°C
-       double area = parms[0]; // e.g., specific surface area
-       return area * k * (1.0 - sr[indices[1]]) * time;
-   }
+1. **Add it directly to the database** (`database/phreeqc_kin.dat`):
+   ```basic
+   Quartz
+   -start
+   10 if (m <= 0 and si("Quartz") < 0) then goto 200
+   20 k = 10^-13.99
+   30 moles = parm(1) * k * (1 - sr("Quartz")) * time
+   200 save moles
+   -end
    ```
-2. **Register the function in [`src/rates.cpp`](file:///mnt/nfsshare/home/mluebke/phreeqc3/cpp_sycl/src/rates.cpp)**:
-   ```cpp
-   void RateRegistry::register_reflection() {
-       ...
-       hipsycl::glue::reflection::enable_function_symbol_reflection(rate_Quartz);
-   }
 
-   RateRegistry::RateRegistry() {
-       ...
-       rates_["Quartz"] = rate_Quartz;
-   }
-   ```
-3. **Recompile**: The solver will automatically detect `"Quartz"` in PQI input files and JIT-specialize the device kernel accordingly.
+2. **Run the application**: As soon as `"Quartz"` is referenced in your `.pqi` input script, `geochem_sycl` will automatically parse the BASIC script, transpile it to C++, inject it into the solver backend, and JIT-compile a new optimized library on the GPU!

@@ -2,10 +2,13 @@
 #include <iomanip>
 #include <cmath>
 #include <cassert>
+#include <filesystem>
 #include <sycl/sycl.hpp>
 #include "dto.hpp"
+#include "rates.hpp"
 #include "parser.hpp"
 #include "solver_backend.hpp"
+#include "jit_compiler.hpp"
 
 bool check_close(const std::string& name, double actual, double expected, double rel_tol = 0.01, double abs_tol = 1e-6) {
     double diff = std::fabs(actual - expected);
@@ -51,6 +54,21 @@ int main() {
         pqi_path = "../../python/verify.pqi";
     }
 
+    std::string kinetics_dir = "database/rates";
+    auto dir_exists = [](const std::string& d) {
+        return std::filesystem::exists(d) && std::filesystem::is_directory(d);
+    };
+    if (!dir_exists(kinetics_dir) && dir_exists("../database/rates")) {
+        kinetics_dir = "../database/rates";
+    }
+    if (!dir_exists(kinetics_dir) && dir_exists("cpp_sycl/database/rates")) {
+        kinetics_dir = "cpp_sycl/database/rates";
+    }
+    if (!dir_exists(kinetics_dir) && dir_exists("../../database/rates")) {
+        kinetics_dir = "../../database/rates";
+    }
+
+
     geochem::PhreeqcDatabase db;
     if (!db.parse(db_path)) {
         std::cerr << "FAILED: Unable to parse " << db_path << "\n";
@@ -67,10 +85,10 @@ int main() {
     auto matrices = geochem::SystemBuilder::build_system_matrices(db, pqi);
     auto input = geochem::SystemBuilder::create_system_input(db, pqi, matrices, N);
 
-    geochem::BackendSolver solver(q, matrices);
-    geochem::SystemBuilder::equilibrate_initial_state(solver, input);
+    std::unique_ptr<geochem::IBackendSolver> solver(geochem::JitCompiler::compile_and_load(q, matrices, kinetics_dir));
+    geochem::SystemBuilder::equilibrate_initial_state(*solver, input);
 
-    auto output = solver.run_simulation(input.dt);
+    auto output = solver->run_simulation(input.dt);
 
     std::cout << "Verification Benchmark vs PHREEQC Reference (python/verify.out):\n";
     std::cout << "-----------------------------------------------------------------\n";

@@ -374,20 +374,19 @@ inline bool integrate_kinetics_single_cell_device(
     for (int k = 0; k < K; ++k) {
         const double* parms_k = &kinetic_params[(0 * K + k) * N + cell_idx];
         const int* indices_k = &kinetic_indices[k * 3];
-        double r = 0.0;
+        RateContext<double> ctx(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
+                                parms_k, activities.data, si.data, sr.data,
+                                totals, kinetic_moles);
 
+        double r = 0.0;
         if (k == 0) {
-            r = dynamic_rate_0(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
-                               parms_k, activities.data, si.data, sr.data, indices_k);
+            r = dynamic_rate_0(ctx);
         } else if (k == 1) {
-            r = dynamic_rate_1(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
-                               parms_k, activities.data, si.data, sr.data, indices_k);
+            r = dynamic_rate_1(ctx);
         } else if (k == 2) {
-            r = dynamic_rate_2(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
-                               parms_k, activities.data, si.data, sr.data, indices_k);
+            r = dynamic_rate_2(ctx);
         } else if (k == 3) {
-            r = dynamic_rate_3(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
-                               parms_k, activities.data, si.data, sr.data, indices_k);
+            r = dynamic_rate_3(ctx);
         }
         rate_moles[k] = r;
     }
@@ -636,9 +635,6 @@ SystemOutput BackendSolver::run_simulation(double dt) {
     hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_1);
     hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_2);
     hipsycl::glue::reflection::enable_function_symbol_reflection(dynamic_rate_3);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_dummy);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_Calcite);
-    hipsycl::glue::reflection::enable_function_symbol_reflection(rate_Dolomite);
 
     dynamic_function_config config;
     auto& reg = RateRegistry::instance();

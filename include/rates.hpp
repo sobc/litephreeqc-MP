@@ -7,110 +7,62 @@
 
 namespace geochem {
 
-using RateFnPtr = double (*)(double m, double m0, double tk, double time,
-                             const double* parms,
-                             const double* activities,
-                             const double* si,
-                             const double* sr,
-                             const int* indices);
+namespace jit {
+    int get_phase_idx(const char* name);
+    int get_species_idx(const char* name);
+    int get_element_idx(const char* name);
+    int get_kinetics_idx(const char* name);
+}
+
+template<typename Real = double>
+class RateContext {
+    Real m_val, m0_val, tk_val, time_val;
+    const Real* parms_ptr;
+    const Real* act_ptr;
+    const Real* si_ptr;
+    const Real* sr_ptr;
+    const Real* tot_ptr;
+    const Real* kin_ptr;
+
+public:
+    RateContext(Real m, Real m0, Real tk, Real time,
+                const Real* parms, const Real* activities,
+                const Real* si, const Real* sr,
+                const Real* totals, const Real* kin)
+        : m_val(m), m0_val(m0), tk_val(tk), time_val(time),
+          parms_ptr(parms), act_ptr(activities),
+          si_ptr(si), sr_ptr(sr), tot_ptr(totals), kin_ptr(kin) {}
+
+    Real m() const { return m_val; }
+    Real m0() const { return m0_val; }
+    Real tk() const { return tk_val; }
+    Real tc() const { return tk_val - 273.15; }
+    Real time() const { return time_val; }
+    Real parm(int i) const { return parms_ptr[i - 1]; } // 1-based index
+
+    // String resolved lookups
+    Real si(const char* name) const { return si_ptr[geochem::jit::get_phase_idx(name)]; }
+    Real sr(const char* name) const { return sr_ptr[geochem::jit::get_phase_idx(name)]; }
+    Real act(const char* name) const { return act_ptr[geochem::jit::get_species_idx(name)]; }
+    Real tot(const char* name) const { return tot_ptr[geochem::jit::get_element_idx(name)]; }
+    Real kin(const char* name) const { return kin_ptr[geochem::jit::get_kinetics_idx(name)]; }
+
+    template<typename T = void> Real gas(const char* name) const { static_assert(sizeof(T) == 0, "GAS() is not supported yet."); return 0.0; }
+    template<typename T = void> Real sys(const char* name) const { static_assert(sizeof(T) == 0, "SYS() is not supported yet."); return 0.0; }
+    template<typename T = void> Real mol(const char* name) const { static_assert(sizeof(T) == 0, "MOL() is not supported yet (use ACT)."); return 0.0; }
+    template<typename T = void> Real la(const char* name) const { static_assert(sizeof(T) == 0, "LA() is not supported yet (use ACT)."); return 0.0; }
+};
+
+using RateFnPtr = double (*)(const RateContext<double>& ctx);
 
 // Abstract dynamic function targets for AdaptiveCpp SSCP JIT
-SYCL_EXTERNAL inline double dynamic_rate_0(double m, double m0, double tk, double time,
-                                           const double* parms, const double* activities,
-                                           const double* si, const double* sr, const int* indices) {
-    return 0.0;
-}
+SYCL_EXTERNAL inline double dynamic_rate_0(const RateContext<double>& ctx) { return 0.0; }
+SYCL_EXTERNAL inline double dynamic_rate_1(const RateContext<double>& ctx) { return 0.0; }
+SYCL_EXTERNAL inline double dynamic_rate_2(const RateContext<double>& ctx) { return 0.0; }
+SYCL_EXTERNAL inline double dynamic_rate_3(const RateContext<double>& ctx) { return 0.0; }
 
-SYCL_EXTERNAL inline double dynamic_rate_1(double m, double m0, double tk, double time,
-                                           const double* parms, const double* activities,
-                                           const double* si, const double* sr, const int* indices) {
-    return 0.0;
-}
+// Concrete pre-compiled C++ rate functions have been moved to dynamic external libraries.
 
-SYCL_EXTERNAL inline double dynamic_rate_2(double m, double m0, double tk, double time,
-                                           const double* parms, const double* activities,
-                                           const double* si, const double* sr, const int* indices) {
-    return 0.0;
-}
-
-SYCL_EXTERNAL inline double dynamic_rate_3(double m, double m0, double tk, double time,
-                                           const double* parms, const double* activities,
-                                           const double* si, const double* sr, const int* indices) {
-    return 0.0;
-}
-
-// Concrete pre-compiled C++ rate functions
-SYCL_EXTERNAL inline double rate_dummy(double m, double m0, double tk, double time,
-                                       const double* parms, const double* activities,
-                                       const double* si, const double* sr, const int* indices) {
-    return 0.0;
-}
-
-SYCL_EXTERNAL inline double rate_Calcite(double m, double m0, double tk, double time,
-                                         const double* parms, const double* activities,
-                                         const double* si, const double* sr, const int* indices) {
-    double M = m;
-    double TK = tk;
-
-    double act_H = activities[indices[0]];
-    double si_Calcite = si[indices[1]];
-    double sr_Calcite = sr[indices[1]];
-
-    if (M <= 0.0 && si_Calcite < 0.0) {
-        return 0.0;
-    }
-
-    constexpr double R = 8.314462;
-    double deltaT = 1.0 / TK - 1.0 / 298.15;
-    constexpr double e = 2.718282;
-
-    // Mechanism 1 (acid)
-    constexpr double Ea_a = 14400.0;
-    constexpr double logK25_a = -0.3;
-    double mech_a = sycl::pow(10.0, logK25_a) * sycl::pow(e, -Ea_a / R * deltaT) * act_H;
-
-    // Mechanism 2 (neutral / water)
-    constexpr double Ea_c = 23500.0;
-    constexpr double logK25_c = -5.81;
-    double mech_c = sycl::pow(10.0, logK25_c) * sycl::pow(e, -Ea_c / R * deltaT);
-
-    double rate = mech_a + mech_c;
-    double moles = parms[0] * rate * (1.0 - sr_Calcite);
-    return moles * time;
-}
-
-SYCL_EXTERNAL inline double rate_Dolomite(double m, double m0, double tk, double time,
-                                          const double* parms, const double* activities,
-                                          const double* si, const double* sr, const int* indices) {
-    double M = m;
-    double TK = tk;
-
-    double act_H = activities[indices[0]];
-    double si_Dolomite = si[indices[1]];
-    double sr_Dolomite = sr[indices[1]];
-
-    if (M <= 0.0 && si_Dolomite < 0.0) {
-        return 0.0;
-    }
-
-    constexpr double R = 8.314462;
-    double deltaT = 1.0 / TK - 1.0 / 298.15;
-    constexpr double e = 2.718282;
-
-    // Mechanism 1 (acid)
-    constexpr double Ea_a = 36100.0;
-    constexpr double logK25_a = -3.19;
-    double mech_a = sycl::pow(10.0, logK25_a) * sycl::pow(e, -Ea_a / R * deltaT) * sycl::pow(act_H, 0.5);
-
-    // Mechanism 2 (neutral)
-    constexpr double Ea_c = 52200.0;
-    constexpr double logK25_c = -7.53;
-    double mech_c = sycl::pow(10.0, logK25_c) * sycl::pow(e, -Ea_c / R * deltaT);
-
-    double rate = mech_a + mech_c;
-    double moles = parms[0] * rate * (1.0 - sr_Dolomite);
-    return moles * time;
-}
 
 // Rate Registry for host-side dispatch configuration
 class RateRegistry {
@@ -118,6 +70,7 @@ public:
     static RateRegistry& instance();
 
     void register_rate(const std::string& name, RateFnPtr fn);
+    void load_kinetics_from_dir(const std::string& path);
     RateFnPtr get_rate(const std::string& name) const;
     bool has_rate(const std::string& name) const;
 

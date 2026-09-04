@@ -20,10 +20,10 @@ include_directories(
 
 add_library(sycl_solver_backend SHARED
     src/rates.cpp
-    src/solver_backend.cpp
-    src/parser.cpp
+    src/jit_compiler.cpp
+    src/parser.cpp src/basic_transpiler.cpp
 )
-add_sycl_to_target(TARGET sycl_solver_backend SOURCES src/rates.cpp src/solver_backend.cpp src/parser.cpp)
+add_sycl_to_target(TARGET sycl_solver_backend SOURCES src/rates.cpp src/jit_compiler.cpp src/parser.cpp src/basic_transpiler.cpp)
 
 add_executable(geochem_sycl src/main.cpp)
 target_link_libraries(geochem_sycl PRIVATE sycl_solver_backend)
@@ -32,3 +32,4 @@ add_sycl_to_target(TARGET geochem_sycl SOURCES src/main.cpp)
 add_executable(test_verify tests/test_verify.cpp)
 target_link_libraries(test_verify PRIVATE sycl_solver_backend)
 add_sycl_to_target(TARGET test_verify SOURCES tests/test_verify.cpp)
+

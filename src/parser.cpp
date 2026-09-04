@@ -306,6 +306,38 @@ bool PhreeqcDatabase::parse(const std::string& filepath) {
                 pp.logk = logk;
                 phases[phase_name] = pp;
             }
+        } else if (current_section == "RATES") {
+            std::string rate_name = l;
+            i++;
+            std::string basic_code = "";
+            bool in_script = false;
+            while (i < lines.size()) {
+                std::string sub_line = trim(lines[i]);
+                if (sub_line.empty() || sub_line[0] == '#') { i++; continue; }
+                
+                if (sub_line == "-start") {
+                    in_script = true;
+                    i++;
+                    continue;
+                } else if (sub_line == "-end") {
+                    i++;
+                    break;
+                }
+                
+                if (sub_line == "SOLUTION_MASTER_SPECIES" ||
+                    sub_line == "SOLUTION_SPECIES" ||
+                    sub_line == "PHASES" ||
+                    sub_line == "RATES" ||
+                    (!in_script && sub_line[0] != '-' && sub_line.find(' ') == std::string::npos)) {
+                    break;
+                }
+
+                if (in_script) {
+                    basic_code += lines[i] + "\n";
+                }
+                i++;
+            }
+            rates_scripts[rate_name] = basic_code;
         } else {
             i++;
         }
@@ -615,6 +647,11 @@ SystemMatrices SystemBuilder::build_system_matrices(const PhreeqcDatabase& db, c
         sm.kinetic_indices[k * 3 + 0] = h_species_idx;
         sm.kinetic_indices[k * 3 + 1] = phase_idx;
         sm.kinetic_indices[k * 3 + 2] = phase_idx;
+        
+        auto rate_it = db.rates_scripts.find(k_name);
+        if (rate_it != db.rates_scripts.end()) {
+            sm.rates_scripts[k_name] = rate_it->second;
+        }
     }
 
     return sm;
@@ -664,7 +701,7 @@ SystemInput SystemBuilder::create_system_input(const PhreeqcDatabase& db,
     return input;
 }
 
-void SystemBuilder::equilibrate_initial_state(BackendSolver& solver, SystemInput& input) {
+void SystemBuilder::equilibrate_initial_state(IBackendSolver& solver, SystemInput& input) {
     int N = static_cast<int>(input.cells.size());
     const auto& matrices = solver.get_matrices();
     int E = matrices.E;

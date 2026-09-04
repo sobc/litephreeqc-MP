@@ -2,14 +2,18 @@
 #include <iomanip>
 #include <string>
 #include <sycl/sycl.hpp>
+#include <filesystem>
 #include "dto.hpp"
+#include "rates.hpp"
 #include "parser.hpp"
 #include "solver_backend.hpp"
+#include "jit_compiler.hpp"
 
 int main(int argc, char* argv[]) {
     std::string db_path = "database/phreeqc_kin.dat";
     std::string pqi_path = "examples/verify.pqi";
     int num_cells = 1;
+    std::string kinetics_dir = "database/rates";
 
     // Default path fallback if running from build/ directory
     auto files_exist = [](const std::string& d, const std::string& p) {
@@ -21,6 +25,12 @@ int main(int argc, char* argv[]) {
         db_path = "../database/phreeqc_kin.dat";
         pqi_path = "../examples/verify.pqi";
     }
+    auto dir_exists = [](const std::string& d) {
+        return std::filesystem::exists(d) && std::filesystem::is_directory(d);
+    };
+    if (!dir_exists(kinetics_dir) && dir_exists("../database/rates")) {
+        kinetics_dir = "../database/rates";
+    }
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -30,6 +40,8 @@ int main(int argc, char* argv[]) {
             pqi_path = argv[++i];
         } else if ((arg == "-n" || arg == "--num_cells") && i + 1 < argc) {
             num_cells = std::stoi(argv[++i]);
+        } else if ((arg == "-k" || arg == "--kinetics-dir") && i + 1 < argc) {
+            kinetics_dir = argv[++i];
         }
     }
 
@@ -41,6 +53,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Target Device: " << q.get_device().get_info<sycl::info::device::name>() << "\n";
     std::cout << "Database:      " << db_path << "\n";
     std::cout << "Input Script:  " << pqi_path << "\n";
+    std::cout << "Kinetics Dir:  " << kinetics_dir << "\n";
     std::cout << "Cells Count:   " << num_cells << "\n\n";
 
     // 1. Parse database and PQI
@@ -64,16 +77,16 @@ int main(int argc, char* argv[]) {
     std::cout << "\n\n";
 
     // 3. Initialize solver & execute two-stage equilibration
-    geochem::BackendSolver solver(q, matrices);
+    std::unique_ptr<geochem::IBackendSolver> solver(geochem::JitCompiler::compile_and_load(q, matrices, kinetics_dir));
     std::cout << "Performing two-stage initial equilibration...\n";
-    geochem::SystemBuilder::equilibrate_initial_state(solver, input);
+    geochem::SystemBuilder::equilibrate_initial_state(*solver, input);
 
     double initial_ph = input.cells[0].initial_ph;
     std::cout << "Equilibrated Initial pH: " << std::fixed << std::setprecision(5) << initial_ph << "\n\n";
 
     // 4. Run parallel simulation
     std::cout << "Launching SYCL parallel kernel (dt = " << input.dt << " s across " << num_cells << " cells)...\n";
-    auto output = solver.run_simulation(input.dt);
+    auto output = solver->run_simulation(input.dt);
 
     std::cout << "Simulation completed in " << std::setprecision(4) << output.elapsed_seconds << " seconds.\n";
     if (output.elapsed_seconds > 0.0) {
