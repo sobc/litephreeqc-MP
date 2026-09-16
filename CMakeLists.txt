@@ -23,6 +23,10 @@ add_library(sycl_solver_backend SHARED
     src/jit_compiler.cpp
     src/parser.cpp src/basic_transpiler.cpp
 )
+target_compile_definitions(sycl_solver_backend PRIVATE
+    LITEPHREEQC_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include"
+    LITEPHREEQC_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
 add_sycl_to_target(TARGET sycl_solver_backend SOURCES src/rates.cpp src/jit_compiler.cpp src/parser.cpp src/basic_transpiler.cpp)
 
 add_executable(geochem_sycl src/main.cpp)

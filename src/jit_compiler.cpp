@@ -9,10 +9,8 @@
 namespace geochem {
 
 IBackendSolver* JitCompiler::compile_and_load(sycl::queue q, const SystemMatrices& matrices, const std::string& kinetics_dir) {
-    std::string cache_dir = ".cache";
-    if (!std::filesystem::exists(cache_dir)) {
-        std::filesystem::create_directory(cache_dir);
-    }
+    std::filesystem::path cache_dir = std::filesystem::current_path() / ".cache";
+    std::filesystem::create_directories(cache_dir);
 
     // Create a hash/name based on the requested kinetics
     std::string hash_name = "solver";
@@ -20,19 +18,35 @@ IBackendSolver* JitCompiler::compile_and_load(sycl::queue q, const SystemMatrice
         hash_name += "_" + k;
     }
 
-    std::string so_path = cache_dir + "/" + hash_name + ".so";
-    std::string cpp_path = cache_dir + "/" + hash_name + ".cpp";
+    std::string so_path = (cache_dir / (hash_name + ".so")).string();
+    std::string cpp_path = (cache_dir / (hash_name + ".cpp")).string();
 
+#ifdef LITEPHREEQC_INCLUDE_DIR
+    std::string include_dir = LITEPHREEQC_INCLUDE_DIR;
+#else
     std::string include_dir = std::filesystem::absolute("include").string();
     if (!std::filesystem::exists(include_dir)) include_dir = std::filesystem::absolute("../include").string();
+    if (!std::filesystem::exists(include_dir)) include_dir = std::filesystem::absolute("ext/litephreeqc-MP/include").string();
+    if (!std::filesystem::exists(include_dir)) include_dir = std::filesystem::absolute("../ext/litephreeqc-MP/include").string();
+#endif
+
+#ifdef LITEPHREEQC_SRC_DIR
+    std::string src_dir = LITEPHREEQC_SRC_DIR;
+#else
     std::string src_dir = std::filesystem::absolute("src").string();
     if (!std::filesystem::exists(src_dir)) src_dir = std::filesystem::absolute("../src").string();
+    if (!std::filesystem::exists(src_dir)) src_dir = std::filesystem::absolute("ext/litephreeqc-MP/src").string();
+    if (!std::filesystem::exists(src_dir)) src_dir = std::filesystem::absolute("../ext/litephreeqc-MP/src").string();
+#endif
 
     // If the library doesn't exist, generate and compile it
     if (!std::filesystem::exists(so_path)) {
         std::cout << "[JIT] Generating and compiling kernel: " << hash_name << " ...\n";
         
         std::ofstream out(cpp_path);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to create JIT source file: " + cpp_path);
+        }
         
         // Write transpiled rate functions
         for (const auto& k : matrices.kinetics_names) {
@@ -87,7 +101,7 @@ IBackendSolver* JitCompiler::compile_and_load(sycl::queue q, const SystemMatrice
         out.close();
 
         // Prepare the compile command
-        std::string cmd = "syclcc -O3 -shared -fPIC -I" + include_dir + " --acpp-targets=generic --acpp-export-all " + cpp_path + " -o " + so_path;
+        std::string cmd = "acpp -O3 -shared -fPIC -I" + include_dir + " --acpp-targets=generic --acpp-export-all " + cpp_path + " -o " + so_path;
         
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
