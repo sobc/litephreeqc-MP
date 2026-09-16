@@ -75,6 +75,25 @@ The parser extracts:
 - Equilibrium phases with target saturation indices (`Gypsum`: target SI = 0.0, initial mass = 0.0).
 - Kinetic components (`Calcite`: initial mass $m_0 = 0.01$, current mass $m = 0.01$, surface area parameter $A/V = 100\,\text{dm}^{-1}$, step duration $\Delta t = 100\,\text{s}$).
 
+### 3.1 Multi-Block Scenario Support & Kinetic Merging
+In complex reactive transport benchmarks (e.g., Dolomite transport in POET), PQI input files define multiple `SOLUTION`, `EQUILIBRIUM_PHASES`, and `KINETICS` blocks (e.g., initial background water `SOLUTION 1` vs inflowing boundary water `SOLUTION 2`):
+
+- **Continuous Block Processing**: The parser does not prematurely stop upon encountering a second block; it parses all solution definitions, equilibrium mineral definitions, and kinetics across the file.
+- **Kinetic Component De-duplication & Parameter Merging**: If the same kinetic mineral (e.g. `Calcite` or `Dolomite`) is declared across multiple blocks, the parser merges declarations:
+  ```cpp
+  auto it = std::find_if(kinetics.begin(), kinetics.end(), [&](const KineticCompInput& k) {
+      return k.rate_name == kin.rate_name;
+  });
+  if (it == kinetics.end()) {
+      kinetics.push_back(kin);
+  } else {
+      if (it->parms.empty() && !kin.parms.empty()) it->parms = kin.parms;
+      if (it->m == 0.0 && kin.m != 0.0) it->m = kin.m;
+      if (it->m0 == 0.0 && kin.m0 != 0.0) it->m0 = kin.m0;
+  }
+  ```
+- **Ignoring Non-Chemical Directives**: Directives such as `SELECTED_OUTPUT`, `USER_PUNCH`, `PRINT`, and `END` are parsed and ignored without interrupting subsequent blocks.
+
 ---
 
 ## 4. Matrix Assembly (`SystemBuilder::build_system_matrices`)
