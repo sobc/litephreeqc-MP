@@ -31,7 +31,7 @@ std::string BasicTranspiler::transpile(const std::string& rate_name, const std::
     
     // Pattern to catch GOTO statements
     std::regex goto_regex(R"(goto\s+(\d+))", std::regex_constants::icase);
-    std::regex if_then_regex(R"(if\s*\((.*?)\)\s*then\s*(.*))", std::regex_constants::icase);
+    std::regex if_then_regex(R"(\bif\s+(.*?)\s+then\s+(.*))", std::regex_constants::icase);
     
     // Pattern to catch x ^ y
     std::regex pow_regex(R"(([\w\.\(\)\"\'_]+)\s*\^\s*([\w\.\(\)\"\'_\-]+))", std::regex_constants::icase);
@@ -105,6 +105,20 @@ std::string BasicTranspiler::transpile(const std::string& rate_name, const std::
             // Re-check for GOTO inside action
             action = std::regex_replace(action, goto_regex, "goto L$1;");
             if (!action.empty() && action.back() != ';') action += ";";
+
+            // Replace single '=' with '==' in condition if not part of <=, >=, !=, ==
+            std::string fixed_cond = "";
+            for (size_t ci = 0; ci < cond.length(); ++ci) {
+                if (cond[ci] == '=' &&
+                    (ci == 0 || (cond[ci-1] != '<' && cond[ci-1] != '>' && cond[ci-1] != '!' && cond[ci-1] != '=')) &&
+                    (ci + 1 == cond.length() || cond[ci+1] != '=')) {
+                    fixed_cond += "==";
+                } else {
+                    fixed_cond += cond[ci];
+                }
+            }
+            cond = fixed_cond;
+
             t_line = prefix + "if (" + cond + ") { " + action + " }";
         } else {
             t_line = std::regex_replace(t_line, goto_regex, "goto L$1;");
@@ -131,13 +145,19 @@ std::string BasicTranspiler::transpile(const std::string& rate_name, const std::
 
             // Find base 'a' (scan backwards)
             int start_a = caret - 1;
+            while (start_a >= 0 && std::isspace(t_line[start_a])) {
+                start_a--;
+            }
             int parens = 0;
-            if (t_line[start_a] == ')') {
+            if (start_a >= 0 && t_line[start_a] == ')') {
                 parens = 1;
                 start_a--;
                 while (start_a >= 0 && parens > 0) {
                     if (t_line[start_a] == ')') parens++;
                     else if (t_line[start_a] == '(') parens--;
+                    start_a--;
+                }
+                while (start_a >= 0 && (std::isalnum(t_line[start_a]) || t_line[start_a] == '_' || t_line[start_a] == '.' || t_line[start_a] == ':')) {
                     start_a--;
                 }
             } else {
@@ -149,6 +169,9 @@ std::string BasicTranspiler::transpile(const std::string& rate_name, const std::
 
             // Find exponent 'b' (scan forwards)
             int end_b = caret + 1;
+            while (end_b < t_line.length() && std::isspace(t_line[end_b])) {
+                end_b++;
+            }
             parens = 0;
             if (end_b < t_line.length() && t_line[end_b] == '(') {
                 parens = 1;
@@ -167,8 +190,8 @@ std::string BasicTranspiler::transpile(const std::string& rate_name, const std::
                 }
             }
             
-            std::string a = t_line.substr(start_a, caret - start_a);
-            std::string b = t_line.substr(caret + 1, end_b - caret - 1);
+            std::string a = trim(t_line.substr(start_a, caret - start_a));
+            std::string b = trim(t_line.substr(caret + 1, end_b - caret - 1));
             
             std::string replacement;
             if (to_lower(a) == "e") {

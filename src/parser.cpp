@@ -368,28 +368,17 @@ bool PqiParser::parse_pqi(const std::string& filepath, const PhreeqcDatabase& db
         std::string upper_word = to_upper(first_word);
 
         if (upper_word.find("SOLUTION") == 0) {
-            if (!parsed_solution) {
-                current_block = "SOLUTION";
-                parsed_solution = true;
-            } else {
-                current_block = "SKIP";
-            }
+            current_block = "SOLUTION";
             continue;
         } else if (upper_word.find("EQUILIBRIUM_PHASES") == 0 || upper_word.find("PURE") == 0) {
-            if (!parsed_equilibrium) {
-                current_block = "EQUILIBRIUM_PHASES";
-                parsed_equilibrium = true;
-            } else {
-                current_block = "SKIP";
-            }
+            current_block = "EQUILIBRIUM_PHASES";
             continue;
         } else if (upper_word.find("KINETICS") == 0) {
-            if (!parsed_kinetics) {
-                current_block = "KINETICS";
-                parsed_kinetics = true;
-            } else {
-                current_block = "SKIP";
-            }
+            current_block = "KINETICS";
+            continue;
+        } else if (upper_word == "SELECTED_OUTPUT" || upper_word == "USER_PUNCH" ||
+                   upper_word == "PRINT" || upper_word == "END") {
+            current_block = "";
             continue;
         } else if (upper_word == "SELECTED_OUTPUT" || upper_word == "USER_PUNCH" ||
                    upper_word == "PRINT" || upper_word == "END") {
@@ -466,7 +455,16 @@ bool PqiParser::parse_pqi(const std::string& filepath, const PhreeqcDatabase& db
                         sub_ss >> steps;
                     }
                 }
-                kinetics.push_back(kin);
+                auto it = std::find_if(kinetics.begin(), kinetics.end(), [&](const KineticCompInput& k) {
+                    return k.rate_name == kin.rate_name;
+                });
+                if (it == kinetics.end()) {
+                    kinetics.push_back(kin);
+                } else {
+                    if (it->parms.empty() && !kin.parms.empty()) it->parms = kin.parms;
+                    if (it->m == 0.0 && kin.m != 0.0) it->m = kin.m;
+                    if (it->m0 == 0.0 && kin.m0 != 0.0) it->m0 = kin.m0;
+                }
             }
         }
     }
