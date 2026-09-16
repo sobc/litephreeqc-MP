@@ -144,11 +144,53 @@ bool solve_cell_equilibrium_device(
 
     bool conv = false;
 
+    for (int e = 0; e < E; ++e) {
+        if (e != h_idx && totals[e] < 0.0) {
+            return false;
+        }
+    }
+
+    // 0. Identify elements with no mass in this cell
+    bool has_mass[MAX_ELEMENTS];
+    for (int e = 0; e < E; ++e) {
+        if (e == h_idx) {
+            has_mass[e] = true;
+        } else {
+            bool present = (totals[e] > 1e-16);
+            if (!present) {
+                for (int p = 0; p < P; ++p) {
+                    if (mineral_stoich[p * E + e] != 0.0 && (moles_min[p] > 1e-16 || force_eq[p])) {
+                        present = true;
+                        break;
+                    }
+                }
+            }
+            has_mass[e] = present;
+            if (!present) {
+                ln_act[e] = -40.0 * LN10;
+            } else if (ln_act[e] < -30.0 * LN10) {
+                ln_act[e] = sycl::log(totals[e]);
+            }
+        }
+    }
+
     for (int iter = 0; iter < MAX_ITER; ++iter) {
         // Compute ionic strength and activity coefficients
         double I = 0.01;
         for (int step = 0; step < 4; ++step) {
             for (int i = 0; i < S; ++i) {
+                bool spec_has_mass = true;
+                for (int e = 0; e < E; ++e) {
+                    if (species_stoich[i * E + e] != 0.0 && !has_mass[e]) {
+                        spec_has_mass = false;
+                        break;
+                    }
+                }
+                if (!spec_has_mass) {
+                    molalities[i] = 0.0;
+                    gammas[i] = 1.0;
+                    continue;
+                }
                 double ln_m = LN10 * species_logK[i];
                 for (int e = 0; e < E; ++e) {
                     double coeff = species_stoich[i * E + e];
@@ -178,7 +220,9 @@ bool solve_cell_equilibrium_device(
 
         // 1. Mass balance
         for (int e = 0; e < E; ++e) {
-            if (e == h_idx) {
+            if (!has_mass[e]) {
+                R[e] = 0.0;
+            } else if (e == h_idx) {
                 if (fix_pH) {
                     R[e] = 0.0;
                 } else {
@@ -232,7 +276,10 @@ bool solve_cell_equilibrium_device(
         for (int j = 0; j < E; ++j) {
             for (int k = 0; k < E; ++k) {
                 double tot = 0.0;
-                if (j == h_idx) {
+                if (!has_mass[j] || !has_mass[k]) {
+                    if (j == k) tot = 1.0;
+                    else tot = 0.0;
+                } else if (j == h_idx) {
                     if (fix_pH) {
                         if (j == k) tot = 1.0;
                     } else {
@@ -255,7 +302,7 @@ bool solve_cell_equilibrium_device(
 
         for (int j = 0; j < E; ++j) {
             for (int p = 0; p < P; ++p) {
-                if (j == h_idx) {
+                if (j == h_idx || !has_mass[j]) {
                     J(j, E + p) = 0.0;
                 } else {
                     J(j, E + p) = mineral_stoich[p * E + j];
@@ -295,6 +342,7 @@ bool solve_cell_equilibrium_device(
         // 5. Apply relaxation updates
         constexpr double MAX_D_LN = 2.302;
         for (int e = 0; e < E; ++e) {
+            if (!has_mass[e]) continue;
             double d = delta[e];
             if (d > MAX_D_LN) d = MAX_D_LN;
             else if (d < -MAX_D_LN) d = -MAX_D_LN;
@@ -341,7 +389,7 @@ inline bool integrate_kinetics_single_cell_device(
     int cell_idx, int N, double temp_k, double press_atm, double water_kg,
     double* totals, double* moles_min, const double* target_si, const bool* force_eq,
     double* kinetic_moles, const double* kinetic_moles_init, const double* kinetic_params,
-    double charge_balance_target, double* ln_act, double& h,
+    double charge_balance_target, double* ln_act, double h, double& next_h,
     int E, int S, int P, int P_all, int K, int h_idx,
     const double* species_stoich, const double* species_logK, const double* species_charge, const double* species_gamma,
     const double* mineral_stoich, const double* mineral_logK,
@@ -364,12 +412,14 @@ inline bool integrate_kinetics_single_cell_device(
     );
 
     if (!conv) {
+        next_h = h / 2.0;
         return false;
     }
 
     // 2. Evaluate rates via dynamic functions (specialized inline by AdaptiveCpp JIT)
     FixedVector<double, MAX_KINETICS> rate_moles;
     rate_moles.fill(0.0);
+    double max_allowed_h = 1e30;
 
     for (int k = 0; k < K; ++k) {
         const double* parms_k = &kinetic_params[(0 * K + k) * N + cell_idx];
@@ -388,6 +438,73 @@ inline bool integrate_kinetics_single_cell_device(
         } else if (k == 3) {
             r = dynamic_rate_3(ctx);
         }
+
+        // Physical bounds & rate-limited step sizing:
+        // 1. Dissolution: cannot dissolve more mineral than currently available
+        if (r > 0.0) {
+            if (kinetic_moles[k] <= 1e-12) {
+                r = 0.0;
+            } else {
+                if (kinetic_moles[k] > 1e-8 && r > kinetic_moles[k] * 1.05) {
+                    // Step overshoots remaining mineral: reject and retry with exact depletion step size
+                    next_h = sycl::max(h * (kinetic_moles[k] / r), 1e-6);
+                    return false;
+                }
+                if (r > kinetic_moles[k]) {
+                    r = kinetic_moles[k];
+                }
+                // Rate-limited step size constraint: max 20% dissolution per sub-step
+                double limit_diss = h * (0.20 * kinetic_moles[k] + 1e-7) / r;
+                if (limit_diss < max_allowed_h) {
+                    max_allowed_h = limit_diss;
+                }
+                // Actively dissolving mineral: cap step size to 5s to prevent explicit Euler drift
+                if (r > 1e-8 && max_allowed_h > 5.0) {
+                    max_allowed_h = 5.0;
+                }
+            }
+        }
+
+        // 2. Precipitation: cannot overshoot saturation equilibrium (SR = 1) or consume below zero
+        if (r < 0.0) {
+            int phase_idx = indices_k[1];
+            double sr_val = (phase_idx >= 0 && phase_idx < P_all) ? sr[phase_idx] : 1.0;
+            if (sr_val > 1.0) {
+                double x_max = 1e30;
+                for (int e = 0; e < E; ++e) {
+                    if (e == h_idx) continue;
+                    double coeff = kinetic_stoich[k * E + e];
+                    if (coeff > 0.0 && totals[e] > 0.0) {
+                        double cap = (totals[e] / coeff) * (1.0 - 1.0 / sr_val);
+                        if (cap < x_max) x_max = cap;
+                    }
+                }
+                if (x_max < 1e30 && x_max > 0.0) {
+                    double abs_r = -r;
+                    if (x_max > 1e-8 && abs_r > x_max * 1.25) {
+                        // Step overshoots equilibrium capacity: reject and retry
+                        next_h = sycl::max(h * (0.75 * x_max / abs_r), 1e-6);
+                        return false;
+                    }
+                    if (abs_r > x_max) {
+                        abs_r = x_max * (1.0 - sycl::exp(-abs_r / x_max));
+                    }
+                    r = -abs_r;
+
+                    // Rate-limited step size constraint: max 25% precipitation of capacity per sub-step
+                    double limit_prec = h * (0.25 * x_max + 1e-7) / abs_r;
+                    if (limit_prec < max_allowed_h) {
+                        max_allowed_h = limit_prec;
+                    }
+                    if (abs_r > 1e-8 && max_allowed_h > 5.0) {
+                        max_allowed_h = 5.0;
+                    }
+                }
+            } else {
+                r = 0.0;
+            }
+        }
+
         rate_moles[k] = r;
     }
 
@@ -400,6 +517,10 @@ inline bool integrate_kinetics_single_cell_device(
             if (coeff != 0.0) {
                 trial_totals[e] += rate_moles[k] * coeff;
             }
+        }
+        if (e != h_idx && trial_totals[e] < 0.0) {
+            next_h = h / 2.0;
+            return false;
         }
     }
 
@@ -434,8 +555,11 @@ inline bool integrate_kinetics_single_cell_device(
             kinetic_moles[k] -= rate_moles[k];
             if (kinetic_moles[k] < 0.0) kinetic_moles[k] = 0.0;
         }
+        next_h = sycl::min(h * 1.5, max_allowed_h);
+        if (next_h < 1e-4) next_h = 1e-4;
         return true;
     } else {
+        next_h = h / 2.0;
         return false;
     }
 }
@@ -546,8 +670,10 @@ void BackendSolver::initialize_grid(const SystemInput& input) {
             // Initial activity guess
             if (e_name == "H+") {
                 state_->master_activities[e * N + idx] = -cell.initial_ph * std::log(10.0);
-            } else {
+            } else if (tot > 1e-16) {
                 state_->master_activities[e * N + idx] = -3.0 * std::log(10.0);
+            } else {
+                state_->master_activities[e * N + idx] = -40.0 * std::log(10.0);
             }
         }
 
@@ -578,7 +704,7 @@ bool BackendSolver::solve_initial_equilibration(int cell_idx, bool fix_pH, doubl
     int N = state_->N;
     int E = matrices_.E;
     int S = matrices_.S;
-    int P = matrices_.P;
+    int P = fix_pH ? 0 : matrices_.P;
     int P_all = matrices_.P_all;
     int h_idx = matrices_.h_idx;
 
@@ -687,7 +813,7 @@ SystemOutput BackendSolver::run_simulation(double dt) {
     // Initialize step arrays
     for (int i = 0; i < N; ++i) {
         t_rem[i] = dt;
-        cur_h[i] = dt / 10.0;
+        cur_h[i] = std::min(dt / 10.0, 1.0);
         conv_arr[i] = true;
     }
 
@@ -723,11 +849,12 @@ SystemOutput BackendSolver::run_simulation(double dt) {
                 h_step = t_rem[idx];
             }
 
+            double next_h = h_step;
             bool accepted = integrate_kinetics_single_cell_device(
                 idx, N, temp[idx], press[idx], water[idx],
                 cell_totals.data, cell_min_moles.data, cell_target_si.data, cell_force_eq,
                 cell_kin_moles.data, cell_kin_init.data, kin_parms,
-                cb_target[idx], cell_ln_act.data, h_step,
+                cb_target[idx], cell_ln_act.data, h_step, next_h,
                 E, S, P, P_all, K, h_idx,
                 sp_stoich, sp_logK, sp_charge, sp_gamma,
                 m_stoich, m_logK,
@@ -737,15 +864,15 @@ SystemOutput BackendSolver::run_simulation(double dt) {
 
             if (accepted) {
                 t_rem[idx] -= h_step;
-                double next_h = h_step * 1.5;
                 if (next_h > t_rem[idx]) next_h = t_rem[idx];
-                cur_h[idx] = (next_h < 1e-4) ? 1e-4 : next_h;
+                cur_h[idx] = next_h;
             } else {
-                cur_h[idx] = h_step / 2.0;
-                if (cur_h[idx] < 1e-6) {
+                double retry_h = sycl::min(next_h, h_step / 2.0);
+                if (retry_h < 1e-9) {
                     conv_arr[idx] = false;
                     break;
                 }
+                cur_h[idx] = retry_h;
             }
         }
 
