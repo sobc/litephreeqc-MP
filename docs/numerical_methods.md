@@ -127,52 +127,47 @@ By **warm-starting** all grid cells with the converged activities from Stage 2, 
 
 ---
 
-## 6. Rate-Limited Adaptive Time Sub-stepping for Kinetics
+## 6. 2nd-Order Runge-Kutta (Heun) Adaptive Sub-stepping for Kinetics
 
-Coupled reactive transport requires robust, accurate integration of kinetic mineral reactions over outer time steps $\Delta t$. Because mineral dissolution and precipitation rates non-linearly depend on saturation indices ($SR$), unconstrained explicit integration can overshoot equilibrium, deplete minerals prematurely, or cause unphysical oscillations.
+Coupled reactive transport requires robust, accurate integration of kinetic mineral reactions over outer time steps $\Delta t$. Because mineral dissolution and precipitation rates non-linearly depend on saturation indices ($SR$), 1st-order explicit Euler integration can accumulate numerical drift across reaction fronts.
 
-To eliminate truncation errors while preserving maximum hardware throughput, `solver_backend.cpp` implements a **physical rate-limited adaptive sub-stepping integrator**:
+To achieve $\mathcal{O}(h^2)$ second-order temporal accuracy and exact error control with zero dynamic memory allocations on device/GPU, `solver_backend.cpp` implements an **embedded 2nd-Order Runge-Kutta (Heun's Predictor-Corrector) method** with physical rate-limiting and local truncation error estimation:
 
-### 6.1 Sub-step Execution Cycle
+### 6.1 Two-Stage Runge-Kutta (Heun) Execution Cycle
 
 ```mermaid
 flowchart TD
-    Start["Start Sub-step with current h <= t_rem"] --> Eq1["1. Solve Equilibrium Speciation<br/>(Yields activities, SI, and SR)"]
-    Eq1 --> Rate["2. Evaluate Kinetic Rates via JIT<br/>r_k = dynamic_rate_k(ctx) [moles in h]"]
-    Rate --> CheckDiss{"Dissolution (r_k > 0):<br/>Overshoot r_k > m_k * 1.05?"}
-    CheckDiss -- Yes --> RejDiss["Reject step!<br/>Retry with h = h * (m_k / r_k)"]
-    CheckDiss -- No --> CheckPrec{"Precipitation (r_k < 0):<br/>Overshoot |r_k| > 1.25 * x_max?"}
-    CheckPrec -- Yes --> RejPrec["Reject step!<br/>Retry with h = h * (0.75 * x_max / |r_k|)"]
-    CheckPrec -- No --> Bounds["Apply Physical Bounds &<br/>Compute Rate-Limited next_h"]
-    Bounds --> TrialTotals["3. Compute Trial Totals T_e^trial"]
-    TrialTotals --> NegCheck{"Any T_e^trial < 0?"}
-    NegCheck -- Yes --> RejNeg["Reject step!<br/>h = h / 2"]
-    NegCheck -- No --> Eq2["4. Solve Trial Equilibrium Speciation"]
-    Eq2 --> ConvCheck{"Trial Equilibrated?"}
-    ConvCheck -- No --> RejConv["Reject step!<br/>h = h / 2"]
-    ConvCheck -- Yes --> Accept["Accept Step!<br/>Commit state, t_rem -= h<br/>h = min(1.5 * h, max_allowed_h)"]
+    Start["Start Sub-step (current h <= t_rem)"] --> S1_Eq["Stage 1: Solve Equilibrium Speciation at t_n<br/>(Yields a_1, SI_1, and SR_1)"]
+    S1_Eq --> S1_Rate["Stage 1: Evaluate Rates k_1 via JIT<br/>k_1 = dynamic_rate(ctx_1)"]
+    S1_Rate --> ActiveCheck{"Any active reaction?<br/>max |k_1| > 1e-15"}
+    ActiveCheck -- No --> QuickAccept["Accept step instantly!<br/>h = min(1.5 * h, 1e30)"]
+    ActiveCheck -- Yes --> Bounds1["Check Dissolution/Precipitation Bounds<br/>Reject if overshoot (exact h_deplete)"]
+    Bounds1 --> S2_Pred["Stage 2: Form Predictor State<br/>T_pred = T_n + sum(nu * k_1)<br/>m_pred = m_n - k_1"]
+    S2_Pred --> S2_Eq["Stage 2: Solve Equilibrium at Predictor State<br/>(Yields a_2, SI_2, and SR_2)"]
+    S2_Eq --> S2_Rate["Stage 2: Evaluate Rates k_2 at Predictor<br/>k_2 = dynamic_rate(ctx_2)"]
+    S2_Rate --> RK_Comb["Compute RK2 Heun Average & Error:<br/>r_RK2 = 0.5 * (k_1 + k_2)<br/>err = 0.5 * |k_1 - k_2|"]
+    RK_Comb --> TolCheck{"Local Error <= tol (1e-8 mol)?"}
+    TolCheck -- No --> RejRK["Reject step!<br/>h_retry = h * 0.8 * sqrt(tol / err)"]
+    TolCheck -- Yes --> FinalSolve["Solve Final Corrector Equilibrium<br/>(Warm-started from Stage 2)"]
+    FinalSolve --> Commit["Accept step, t_rem -= h<br/>h_next = min(h * 0.9 * sqrt(tol/err), max_allowed_h)"]
 ```
 
-### 6.2 Dissolution Boundary Controls
-1. **Trace Depletion**: If mineral inventory $m_k \le 10^{-12}\,\text{mol}$, rate is clamped to zero ($r_k = 0$).
-2. **Depletion Overshoot Rejection**: For $m_k > 10^{-8}\,\text{mol}$, if $r_k > m_k \times 1.05$, explicit Euler would prematurely deplete the mineral. The step is rejected and retried with the exact physical exhaustion time step:
-   $$h_{\text{exact}} = h \cdot \frac{m_k}{r_k}$$
-   For trace amounts ($m_k \le 10^{-8}\,\text{mol}$), $r_k$ is clamped to $m_k$ without rejection, completely preventing Zeno-paradox stalls.
-3. **Rate-Limited Dissolution Growth**: Sub-step growth is bounded so that at most $20\,\%$ of the remaining mineral dissolves in a single step:
-   $$h_{\text{limit, diss}} = h \cdot \frac{0.20 \cdot m_k + 10^{-7}}{r_k}$$
+### 6.2 Mathematical Formulation & Error Estimation
+1. **Stage 1 (Predictor Derivative $k_1$)**:
+   $$\mathbf{k}_1 = \mathbf{R}(t_n, \mathbf{y}_n) \cdot h$$
+2. **Predictor State $\tilde{\mathbf{y}}$**:
+   $$\tilde{T}_e = T_e^n + \sum_{k} \nu_{ke} k_{1, k}, \quad \tilde{m}_k = \max(m_k^n - k_{1, k}, 0)$$
+3. **Stage 2 (Corrector Derivative $k_2$)**:
+   $$\mathbf{k}_2 = \mathbf{R}(t_n + h, \tilde{\mathbf{y}}) \cdot h$$
+4. **Heun Combination**:
+   $$r_{k, \text{RK2}} = \frac{1}{2} \left( k_{1, k} + k_{2, k} \right)$$
+5. **Embedded Local Truncation Error**:
+   $$\varepsilon_k = \left| r_{k, \text{Euler}} - r_{k, \text{RK2}} \right| = \frac{1}{2} \left| k_{1, k} - k_{2, k} \right|$$
+   Tolerance: $\text{tol} = 10^{-8}\,\text{mol}$ (matching standard PHREEQC).
+   - If $\max_k \varepsilon_k > \text{tol}$: Step is rejected and retried with $h_{\text{retry}} = h \cdot 0.8 \sqrt{\frac{\text{tol}}{\varepsilon_{\max}}}$.
+   - If $\max_k \varepsilon_k \le \text{tol}$: Step is accepted and next step size adapts via $h_{\text{next}} = h \cdot 0.9 \sqrt{\frac{\text{tol}}{\varepsilon_{\max}}}$.
 
-### 6.3 Precipitation Saturation Capacity Controls
-1. **Precipitation Capacity Calculation**: For supersaturated phases ($SR > 1.0$), the maximum mineral precipitation before equilibrium ($SR = 1.0$) is estimated from aqueous element totals:
-   $$x_{\max} = \min_{e \ne \text{H}^+, \nu_{ke} > 0} \left( \frac{T_e}{\nu_{ke}} \cdot \left( 1 - \frac{1}{SR} \right) \right)$$
-2. **Equilibrium Overshoot Rejection**: If $|r_k| > 1.25 \cdot x_{\max}$ (with $x_{\max} > 10^{-8}$), explicit Euler would violently overshoot saturation into undersaturation. The step is rejected and retried with:
-   $$h_{\text{retry}} = h \cdot \frac{0.75 \cdot x_{\max}}{|r_k|}$$
-3. **Soft Damping**: If $|r_k| > x_{\max}$, soft saturation damping prevents discrete overshoot:
-   $$|r_k| \leftarrow x_{\max} \cdot \left( 1 - \exp\left(-\frac{|r_k|}{x_{\max}}\right) \right)$$
-4. **Rate-Limited Precipitation Growth**: Sub-step growth is bounded to at most $25\,\%$ of the equilibrium capacity:
-   $$h_{\text{limit, prec}} = h \cdot \frac{0.25 \cdot x_{\max} + 10^{-7}}{|r_k|}$$
-
-### 6.4 Reactive Front Step Capping vs. Quiescent Expansion
-- **Actively Reacting Cells** ($|r_k| > 10^{-8}\,\text{mol}$): The maximum allowed sub-step is capped at $h \le 5.0\,\text{s}$ to prevent accumulated explicit Euler integration drift.
-- **Quiescent & Equilibrium Cells** ($|r_k| \le 10^{-8}\,\text{mol}$): `max_allowed_h` remains $10^{30}$, allowing sub-steps to double/grow at $1.5\times$ up to the full time step $\Delta t = 200\,\text{s}$ in just 12 steps.
-
-This rate-limiting ensures that $>99\,\%$ of grid cells execute at peak speed while actively reacting reaction-front cells maintain sub-nanomole numerical fidelity.
+### 6.3 Physical Boundary Controls
+- **Dissolution Overshoot Rejection**: For $m_k > 10^{-8}\,\text{mol}$, if $k_{1, k} > m_k \times 1.05$, the step is rejected and retried with $h_{\text{exact}} = h \cdot \frac{m_k}{k_{1, k}}$, ensuring exact depletion without premature exhaustion.
+- **Precipitation Capacity Control**: For $SR > 1.0$, $x_{\max} = \min_{e} \frac{T_e}{\nu_{ke}} (1 - 1/SR)$. If $|k_1| > 1.25 x_{\max}$, step is rejected and scaled down.
+- **Quiescent Cell Bypass**: If all kinetic rates $|k_{1, k}| < 10^{-15}$, Stage 2 is completely bypassed, allowing equilibrium cells to double step sizes without extra speciation calls.

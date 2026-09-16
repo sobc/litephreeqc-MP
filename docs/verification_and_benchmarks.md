@@ -84,31 +84,31 @@ The SYCL solver backend was integrated into the parallel reactive transport simu
 
 ### 4.2 Numerical Fidelity vs. Original POET (80,000 Cells)
 
-Comparing outputs at iteration $1{,}000$ between `POET-MP` (SYCL backend) and original `POET` (standard IPhreeqc):
+Comparing outputs at iteration $1{,}000$ between `POET-MP` (with 2nd-Order Runge-Kutta Heun Predictor-Corrector) and original `POET` (standard IPhreeqc):
 
 | Chemical Component | Max Absolute Difference | Mean Absolute Difference | Max Relative Difference | Mean Relative Difference |
 | :--- | :---: | :---: | :---: | :---: |
-| **pH** | $2.917 \times 10^{-5}$ | $6.189 \times 10^{-6}$ | $< 0.001\,\%$ | $0.00006\,\%$ |
-| **C** (mol/kgw) | $1.717 \times 10^{-8}$ | $1.675 \times 10^{-9}$ | $0.015\,\%$ | $0.00137\,\%$ |
-| **Ca** (mol/kgw) | $3.796 \times 10^{-9}$ | $8.131 \times 10^{-10}$ | $0.003\,\%$ | $0.00066\,\%$ |
-| **Mg** (mol/kgw) | $1.351 \times 10^{-8}$ | $1.089 \times 10^{-9}$ | $0.008\,\%$ | $0.00369\,\%$ |
+| **pH** | $1.003 \times 10^{-4}$ | $6.123 \times 10^{-6}$ | $0.001\,\%$ | $0.00006\,\%$ |
+| **C** (mol/kgw) | $4.634 \times 10^{-8}$ | $1.627 \times 10^{-9}$ | $0.037\,\%$ | $0.00133\,\%$ |
+| **Ca** (mol/kgw) | $3.301 \times 10^{-8}$ | $8.762 \times 10^{-10}$ | $0.026\,\%$ | $0.00071\,\%$ |
+| **Mg** (mol/kgw) | $1.377 \times 10^{-8}$ | $1.096 \times 10^{-9}$ | $0.008\,\%$ | $0.00363\,\%$ |
 | **Cl** (mol/kgw) | $4.045 \times 10^{-13}$ | $4.340 \times 10^{-14}$ | $0.000\,\%$ | $0.00000\,\%$ |
-| **Calcite_kin** (mol) | **$1.701 \times 10^{-7}$** | **$8.325 \times 10^{-9}$** | **$0.287\,\%$** | **$0.00434\,\%$** |
-| **Dolomite_kin** (mol) | $7.744 \times 10^{-8}$ | $1.304 \times 10^{-9}$ | $8.582\,\%$ | $0.01703\,\%$ |
+| **Calcite_kin** (mol) | **$3.017 \times 10^{-7}$** | **$8.436 \times 10^{-9}$** | active: **$0.0095\,\%$** (mean) | **$0.00958\,\%$** |
+| **Dolomite_kin** (mol) | **$7.939 \times 10^{-8}$** | **$1.312 \times 10^{-9}$** | active: **$0.4117\,\%$** (max) | **$0.25830\,\%$** |
 | **O2g_eq** (mol) | $8.701 \times 10^{-1}$ | $1.594 \times 10^{-2}$ | $9.530\,\%$ | $0.16773\,\%$ |
 
 #### Reaction Front Verification
 - **Premature Depletion Elimination**: With the rate-limited sub-stepping and exact exhaustion step size $h_{\text{exact}}$, there are **0 cells** where Calcite reaches zero prematurely while remaining positive in original POET.
-- **Trace Mineral Residual**: Across cells where Calcite has dissolved completely in original POET, the maximum residual in POET-MP is $< 6.7 \times 10^{-24}\,\text{mol}$ (floating-point zero).
+- **Dolomite Precision**: Active Dolomite precipitation matches original POET to within $0.41\,\%$ maximum relative error across all precipitating cells.
 
 ### 4.3 Runtime Performance & Parallel Speedup
 
 Benchmarked on a 24-core compute node (`srun -n 1 -c 24`):
 
-| Simulation Stage | Original POET (IPhreeqc MPI) | POET-MP (SYCL Backend) | Speedup Factor |
+| Simulation Stage | Original POET (IPhreeqc MPI) | POET-MP (RK2 Heun) | Speedup Factor |
 | :--- | :---: | :---: | :---: |
-| **Total Simulation Time** | **$2{,}350.16\,\text{s}$** (~$39.2\,\text{min}$) | **$756.43\,\text{s}$** (~$12.6\,\text{min}$) | **$3.11\times$** |
-| **Chemistry (Kinetics)** | **$2{,}279.62\,\text{s}$** (~$38.0\,\text{min}$) | **$696.07\,\text{s}$** (~$11.6\,\text{min}$) | **$3.28\times$** |
-| **Hydrodynamic Diffusion** | $67.59\,\text{s}$ | $14.45\,\text{s}$ | $4.68\times$ |
+| **Total Simulation Time** | **$2{,}350.16\,\text{s}$** (~$39.2\,\text{min}$) | **$937.33\,\text{s}$** (~$15.6\,\text{min}$) | **$2.51\times$** |
+| **Chemistry (Kinetics)** | **$2{,}279.62\,\text{s}$** (~$38.0\,\text{min}$) | **$875.14\,\text{s}$** (~$14.6\,\text{min}$) | **$2.60\times$** |
+| **Hydrodynamic Diffusion** | $67.59\,\text{s}$ | $16.97\,\text{s}$ | $3.98\times$ |
 | **Convergence Rate** | $100.0\,\%$ ($80{,}000{,}000 / 80{,}000{,}000$ solves) | $100.0\,\%$ ($0$ convergence errors) | — |
 

@@ -384,7 +384,8 @@ bool solve_cell_equilibrium_device(
     return conv;
 }
 
-// Single-cell sub-step kinetics integrator
+// Single-cell sub-step kinetics integrator using 2nd-Order Runge-Kutta (Heun's Predictor-Corrector)
+// with embedded local truncation error estimation and rate-limiting
 inline bool integrate_kinetics_single_cell_device(
     int cell_idx, int N, double temp_k, double press_atm, double water_kg,
     double* totals, double* moles_min, const double* target_si, const bool* force_eq,
@@ -396,48 +397,46 @@ inline bool integrate_kinetics_single_cell_device(
     const double* all_phases_stoich, const double* all_phases_logK,
     const double* kinetic_stoich, const int* kinetic_indices
 ) {
-    FixedVector<double, MAX_SPECIES> activities;
-    FixedVector<double, MAX_ALL_PHASES> si;
-    FixedVector<double, MAX_ALL_PHASES> sr;
+    // =========================================================================
+    // Stage 1: Predictor (Initial state at t_n)
+    // =========================================================================
+    FixedVector<double, MAX_SPECIES> activities_1;
+    FixedVector<double, MAX_ALL_PHASES> si_1;
+    FixedVector<double, MAX_ALL_PHASES> sr_1;
 
-    // 1. Equilibrate before rate evaluation
-    bool conv = solve_cell_equilibrium_device(
+    bool conv_1 = solve_cell_equilibrium_device(
         temp_k, press_atm, water_kg, totals, moles_min, target_si, force_eq,
         false, charge_balance_target, ln_act,
         E, S, P, P_all, h_idx,
         species_stoich, species_logK, species_charge, species_gamma,
         mineral_stoich, mineral_logK,
         all_phases_stoich, all_phases_logK,
-        activities, si, sr
+        activities_1, si_1, sr_1
     );
 
-    if (!conv) {
+    if (!conv_1) {
         next_h = h / 2.0;
         return false;
     }
 
-    // 2. Evaluate rates via dynamic functions (specialized inline by AdaptiveCpp JIT)
-    FixedVector<double, MAX_KINETICS> rate_moles;
-    rate_moles.fill(0.0);
+    // Evaluate Stage 1 rates k_1 via JIT-specialized dynamic rate functions
+    FixedVector<double, MAX_KINETICS> rate_1;
+    rate_1.fill(0.0);
     double max_allowed_h = 1e30;
+    bool any_active = false;
 
     for (int k = 0; k < K; ++k) {
         const double* parms_k = &kinetic_params[(0 * K + k) * N + cell_idx];
         const int* indices_k = &kinetic_indices[k * 3];
         RateContext<double> ctx(kinetic_moles[k], kinetic_moles_init[k], temp_k, h,
-                                parms_k, activities.data, si.data, sr.data,
+                                parms_k, activities_1.data, si_1.data, sr_1.data,
                                 totals, kinetic_moles);
 
         double r = 0.0;
-        if (k == 0) {
-            r = dynamic_rate_0(ctx);
-        } else if (k == 1) {
-            r = dynamic_rate_1(ctx);
-        } else if (k == 2) {
-            r = dynamic_rate_2(ctx);
-        } else if (k == 3) {
-            r = dynamic_rate_3(ctx);
-        }
+        if (k == 0) r = dynamic_rate_0(ctx);
+        else if (k == 1) r = dynamic_rate_1(ctx);
+        else if (k == 2) r = dynamic_rate_2(ctx);
+        else if (k == 3) r = dynamic_rate_3(ctx);
 
         // Physical bounds & rate-limited step sizing:
         // 1. Dissolution: cannot dissolve more mineral than currently available
@@ -458,17 +457,18 @@ inline bool integrate_kinetics_single_cell_device(
                 if (limit_diss < max_allowed_h) {
                     max_allowed_h = limit_diss;
                 }
-                // Actively dissolving mineral: cap step size to 5s to prevent explicit Euler drift
+                // Actively dissolving mineral: cap step size to 5s to prevent explicit drift
                 if (r > 1e-8 && max_allowed_h > 5.0) {
                     max_allowed_h = 5.0;
                 }
+                any_active = true;
             }
         }
 
         // 2. Precipitation: cannot overshoot saturation equilibrium (SR = 1) or consume below zero
         if (r < 0.0) {
             int phase_idx = indices_k[1];
-            double sr_val = (phase_idx >= 0 && phase_idx < P_all) ? sr[phase_idx] : 1.0;
+            double sr_val = (phase_idx >= 0 && phase_idx < P_all) ? sr_1[phase_idx] : 1.0;
             if (sr_val > 1.0) {
                 double x_max = 1e30;
                 for (int e = 0; e < E; ++e) {
@@ -499,69 +499,213 @@ inline bool integrate_kinetics_single_cell_device(
                     if (abs_r > 1e-8 && max_allowed_h > 5.0) {
                         max_allowed_h = 5.0;
                     }
+                    any_active = true;
                 }
             } else {
                 r = 0.0;
             }
         }
 
-        rate_moles[k] = r;
+        rate_1[k] = r;
     }
 
-    // 3. Trial totals
-    FixedVector<double, MAX_ELEMENTS> trial_totals;
+    // Optimization: If no mineral is actively reacting, accept immediately without Stage 2
+    if (!any_active) {
+        next_h = sycl::min(h * 1.5, 1e30);
+        return true;
+    }
+
+    // =========================================================================
+    // Stage 2: Corrector (Predicted state at t_n + h)
+    // =========================================================================
+    FixedVector<double, MAX_ELEMENTS> pred_totals;
     for (int e = 0; e < E; ++e) {
-        trial_totals[e] = totals[e];
+        pred_totals[e] = totals[e];
         for (int k = 0; k < K; ++k) {
             double coeff = kinetic_stoich[k * E + e];
             if (coeff != 0.0) {
-                trial_totals[e] += rate_moles[k] * coeff;
+                pred_totals[e] += rate_1[k] * coeff;
             }
         }
-        if (e != h_idx && trial_totals[e] < 0.0) {
+        if (e != h_idx && pred_totals[e] < 0.0) {
             next_h = h / 2.0;
             return false;
         }
     }
 
-    // Trial minerals and ln_act copies
-    FixedVector<double, MAX_MINERALS> trial_moles_min;
-    for (int p = 0; p < P; ++p) trial_moles_min[p] = moles_min[p];
+    FixedVector<double, MAX_MINERALS> pred_moles_min;
+    for (int p = 0; p < P; ++p) pred_moles_min[p] = moles_min[p];
 
-    FixedVector<double, MAX_ELEMENTS> trial_ln_act;
-    for (int e = 0; e < E; ++e) trial_ln_act[e] = ln_act[e];
+    FixedVector<double, MAX_ELEMENTS> pred_ln_act;
+    for (int e = 0; e < E; ++e) pred_ln_act[e] = ln_act[e];
 
-    // 4. Equilibrate trial totals
-    bool conv_trial = solve_cell_equilibrium_device(
-        temp_k, press_atm, water_kg, trial_totals.data, trial_moles_min.data, target_si, force_eq,
-        false, charge_balance_target, trial_ln_act.data,
+    FixedVector<double, MAX_KINETICS> pred_kin_moles;
+    for (int k = 0; k < K; ++k) {
+        pred_kin_moles[k] = kinetic_moles[k] - rate_1[k];
+        if (pred_kin_moles[k] < 0.0) pred_kin_moles[k] = 0.0;
+    }
+
+    // Equilibrate predictor state
+    FixedVector<double, MAX_SPECIES> activities_2;
+    FixedVector<double, MAX_ALL_PHASES> si_2;
+    FixedVector<double, MAX_ALL_PHASES> sr_2;
+
+    bool conv_2 = solve_cell_equilibrium_device(
+        temp_k, press_atm, water_kg, pred_totals.data, pred_moles_min.data, target_si, force_eq,
+        false, charge_balance_target, pred_ln_act.data,
         E, S, P, P_all, h_idx,
         species_stoich, species_logK, species_charge, species_gamma,
         mineral_stoich, mineral_logK,
         all_phases_stoich, all_phases_logK,
-        activities, si, sr
+        activities_2, si_2, sr_2
     );
 
-    if (conv_trial) {
-        // Accept step
-        for (int e = 0; e < E; ++e) {
-            totals[e] = trial_totals[e];
-            ln_act[e] = trial_ln_act[e];
-        }
-        for (int p = 0; p < P; ++p) {
-            moles_min[p] = trial_moles_min[p];
-        }
-        for (int k = 0; k < K; ++k) {
-            kinetic_moles[k] -= rate_moles[k];
-            if (kinetic_moles[k] < 0.0) kinetic_moles[k] = 0.0;
-        }
-        next_h = sycl::min(h * 1.5, max_allowed_h);
-        if (next_h < 1e-4) next_h = 1e-4;
-        return true;
-    } else {
+    if (!conv_2) {
         next_h = h / 2.0;
         return false;
     }
+
+    // Evaluate Stage 2 rates k_2 at predicted state
+    FixedVector<double, MAX_KINETICS> rate_2;
+    rate_2.fill(0.0);
+
+    for (int k = 0; k < K; ++k) {
+        const double* parms_k = &kinetic_params[(0 * K + k) * N + cell_idx];
+        const int* indices_k = &kinetic_indices[k * 3];
+        RateContext<double> ctx(pred_kin_moles[k], kinetic_moles_init[k], temp_k, h,
+                                parms_k, activities_2.data, si_2.data, sr_2.data,
+                                pred_totals.data, pred_kin_moles.data);
+
+        double r = 0.0;
+        if (k == 0) r = dynamic_rate_0(ctx);
+        else if (k == 1) r = dynamic_rate_1(ctx);
+        else if (k == 2) r = dynamic_rate_2(ctx);
+        else if (k == 3) r = dynamic_rate_3(ctx);
+
+        if (r > 0.0) {
+            if (pred_kin_moles[k] <= 1e-12) r = 0.0;
+            else if (r > kinetic_moles[k]) r = kinetic_moles[k];
+        } else if (r < 0.0) {
+            int phase_idx = indices_k[1];
+            double sr_val = (phase_idx >= 0 && phase_idx < P_all) ? sr_2[phase_idx] : 1.0;
+            if (sr_val > 1.0) {
+                double x_max = 1e30;
+                for (int e = 0; e < E; ++e) {
+                    if (e == h_idx) continue;
+                    double coeff = kinetic_stoich[k * E + e];
+                    if (coeff > 0.0 && pred_totals[e] > 0.0) {
+                        double cap = (pred_totals[e] / coeff) * (1.0 - 1.0 / sr_val);
+                        if (cap < x_max) x_max = cap;
+                    }
+                }
+                if (x_max < 1e30 && x_max > 0.0) {
+                    double abs_r = -r;
+                    if (abs_r > x_max) abs_r = x_max * (1.0 - sycl::exp(-abs_r / x_max));
+                    r = -abs_r;
+                }
+            } else {
+                r = 0.0;
+            }
+        }
+        rate_2[k] = r;
+    }
+
+    // =========================================================================
+    // Runge-Kutta 2 (Heun) Combination & Local Truncation Error Estimation
+    // =========================================================================
+    FixedVector<double, MAX_KINETICS> rk2_rate;
+    double max_rk_error = 0.0;
+    constexpr double RK_TOL = 1e-8; // Standard PHREEQC tolerance (mol)
+
+    for (int k = 0; k < K; ++k) {
+        // Average rate of Heun's method: r_rk2 = 0.5 * (k1 + k2)
+        double r_avg = 0.5 * (rate_1[k] + rate_2[k]);
+        if (r_avg > 0.0 && r_avg > kinetic_moles[k]) {
+            r_avg = kinetic_moles[k];
+        }
+        rk2_rate[k] = r_avg;
+
+        // Local truncation error: 0.5 * |k1 - k2|
+        double err_k = 0.5 * sycl::fabs(rate_1[k] - rate_2[k]);
+        if (err_k > max_rk_error) {
+            max_rk_error = err_k;
+        }
+    }
+
+    // Adaptive step rejection if truncation error exceeds RK tolerance
+    if (max_rk_error > RK_TOL && h > 0.01) {
+        double scale = 0.8 * sycl::sqrt(RK_TOL / max_rk_error);
+        if (scale < 0.2) scale = 0.2;
+        next_h = sycl::max(h * scale, 1e-4);
+        return false;
+    }
+
+    // =========================================================================
+    // Final Corrector Speciation & State Commit
+    // =========================================================================
+    FixedVector<double, MAX_ELEMENTS> final_totals;
+    for (int e = 0; e < E; ++e) {
+        final_totals[e] = totals[e];
+        for (int k = 0; k < K; ++k) {
+            double coeff = kinetic_stoich[k * E + e];
+            if (coeff != 0.0) {
+                final_totals[e] += rk2_rate[k] * coeff;
+            }
+        }
+        if (e != h_idx && final_totals[e] < 0.0) {
+            next_h = h / 2.0;
+            return false;
+        }
+    }
+
+    FixedVector<double, MAX_MINERALS> final_moles_min;
+    for (int p = 0; p < P; ++p) final_moles_min[p] = moles_min[p];
+
+    FixedVector<double, MAX_ELEMENTS> final_ln_act;
+    for (int e = 0; e < E; ++e) final_ln_act[e] = pred_ln_act[e]; // Warm-start from stage 2
+
+    FixedVector<double, MAX_SPECIES> final_act;
+    FixedVector<double, MAX_ALL_PHASES> final_si;
+    FixedVector<double, MAX_ALL_PHASES> final_sr;
+
+    bool conv_final = solve_cell_equilibrium_device(
+        temp_k, press_atm, water_kg, final_totals.data, final_moles_min.data, target_si, force_eq,
+        false, charge_balance_target, final_ln_act.data,
+        E, S, P, P_all, h_idx,
+        species_stoich, species_logK, species_charge, species_gamma,
+        mineral_stoich, mineral_logK,
+        all_phases_stoich, all_phases_logK,
+        final_act, final_si, final_sr
+    );
+
+    if (!conv_final) {
+        next_h = h / 2.0;
+        return false;
+    }
+
+    // Step accepted: commit final state to cell
+    for (int e = 0; e < E; ++e) {
+        totals[e] = final_totals[e];
+        ln_act[e] = final_ln_act[e];
+    }
+    for (int p = 0; p < P; ++p) {
+        moles_min[p] = final_moles_min[p];
+    }
+    for (int k = 0; k < K; ++k) {
+        kinetic_moles[k] -= rk2_rate[k];
+        if (kinetic_moles[k] < 0.0) kinetic_moles[k] = 0.0;
+    }
+
+    // Adaptive step sizing based on RK error and rate limits
+    double rk_growth = 1.5;
+    if (max_rk_error > 1e-14) {
+        double s = 0.9 * sycl::sqrt(RK_TOL / max_rk_error);
+        if (s < rk_growth) rk_growth = s;
+        if (rk_growth < 0.5) rk_growth = 0.5;
+    }
+    next_h = sycl::min(h * rk_growth, max_allowed_h);
+    if (next_h < 1e-4) next_h = 1e-4;
+    return true;
 }
 
 BackendSolver::BackendSolver(sycl::queue q, const SystemMatrices& matrices)
