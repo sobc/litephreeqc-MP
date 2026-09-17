@@ -496,8 +496,13 @@ inline bool integrate_kinetics_single_cell_device(
                     if (limit_prec < max_allowed_h) {
                         max_allowed_h = limit_prec;
                     }
-                    if (abs_r > 1e-8 && max_allowed_h > 5.0) {
+                    if (max_allowed_h > 5.0) {
                         max_allowed_h = 5.0;
+                    }
+                    // Front nucleation control: when mineral starts precipitating from near-zero,
+                    // cap sub-step to 1.0s to ensure accurate early trajectory at the front fringe
+                    if (kinetic_moles[k] < 1e-6 && max_allowed_h > 1.0) {
+                        max_allowed_h = 1.0;
                     }
                     any_active = true;
                 }
@@ -614,8 +619,7 @@ inline bool integrate_kinetics_single_cell_device(
     // Runge-Kutta 2 (Heun) Combination & Local Truncation Error Estimation
     // =========================================================================
     FixedVector<double, MAX_KINETICS> rk2_rate;
-    double max_rk_error = 0.0;
-    constexpr double RK_TOL = 1e-8; // Standard PHREEQC tolerance (mol)
+    double max_error_ratio = 0.0;
 
     for (int k = 0; k < K; ++k) {
         // Average rate of Heun's method: r_rk2 = 0.5 * (k1 + k2)
@@ -627,14 +631,29 @@ inline bool integrate_kinetics_single_cell_device(
 
         // Local truncation error: 0.5 * |k1 - k2|
         double err_k = 0.5 * sycl::fabs(rate_1[k] - rate_2[k]);
-        if (err_k > max_rk_error) {
-            max_rk_error = err_k;
+
+        // Dynamic mixed tolerance:
+        // - Standard absolute tolerance: 1e-8 mol
+        // - At front fringes / fresh nucleation (kinetic_moles < 1e-6 and precipitating),
+        //   scale tolerance down with the precipitation amount to enforce relative precision,
+        //   flooring at 1e-11 mol:
+        double tol_k = 1e-8;
+        if (kinetic_moles[k] < 1e-6 && r_avg < 0.0) {
+            double prec_amt = sycl::fabs(r_avg);
+            tol_k = sycl::clamp(0.005 * prec_amt, 1e-11, 1e-8);
+        } else if (kinetic_moles[k] >= 1e-6) {
+            tol_k = sycl::max(1e-8, 1e-4 * kinetic_moles[k]);
+        }
+
+        double ratio_k = err_k / tol_k;
+        if (ratio_k > max_error_ratio) {
+            max_error_ratio = ratio_k;
         }
     }
 
-    // Adaptive step rejection if truncation error exceeds RK tolerance
-    if (max_rk_error > RK_TOL && h > 0.01) {
-        double scale = 0.8 * sycl::sqrt(RK_TOL / max_rk_error);
+    // Adaptive step rejection if truncation error exceeds tolerance ratio
+    if (max_error_ratio > 1.0 && h > 0.001) {
+        double scale = 0.8 / sycl::sqrt(max_error_ratio);
         if (scale < 0.2) scale = 0.2;
         next_h = sycl::max(h * scale, 1e-4);
         return false;
@@ -696,10 +715,10 @@ inline bool integrate_kinetics_single_cell_device(
         if (kinetic_moles[k] < 0.0) kinetic_moles[k] = 0.0;
     }
 
-    // Adaptive step sizing based on RK error and rate limits
+    // Adaptive step sizing based on RK error ratio and rate limits
     double rk_growth = 1.5;
-    if (max_rk_error > 1e-14) {
-        double s = 0.9 * sycl::sqrt(RK_TOL / max_rk_error);
+    if (max_error_ratio > 1e-6) {
+        double s = 0.9 / sycl::sqrt(max_error_ratio);
         if (s < rk_growth) rk_growth = s;
         if (rk_growth < 0.5) rk_growth = 0.5;
     }
