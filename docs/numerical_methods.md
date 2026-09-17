@@ -161,13 +161,16 @@ flowchart TD
    $$\mathbf{k}_2 = \mathbf{R}(t_n + h, \tilde{\mathbf{y}}) \cdot h$$
 4. **Heun Combination**:
    $$r_{k, \text{RK2}} = \frac{1}{2} \left( k_{1, k} + k_{2, k} \right)$$
-5. **Embedded Local Truncation Error**:
+5. **Embedded Local Truncation Error & Dynamic Mixed Tolerance**:
    $$\varepsilon_k = \left| r_{k, \text{Euler}} - r_{k, \text{RK2}} \right| = \frac{1}{2} \left| k_{1, k} - k_{2, k} \right|$$
-   Tolerance: $\text{tol} = 10^{-8}\,\text{mol}$ (matching standard PHREEQC).
-   - If $\max_k \varepsilon_k > \text{tol}$: Step is rejected and retried with $h_{\text{retry}} = h \cdot 0.8 \sqrt{\frac{\text{tol}}{\varepsilon_{\max}}}$.
-   - If $\max_k \varepsilon_k \le \text{tol}$: Step is accepted and next step size adapts via $h_{\text{next}} = h \cdot 0.9 \sqrt{\frac{\text{tol}}{\varepsilon_{\max}}}$.
+   Tolerance adapts dynamically based on mineral state:
+   - For established minerals ($m_k \ge 10^{-6}\,\text{mol}$): $\text{tol}_k = \max(10^{-8}, 10^{-4} \cdot m_k)\,\text{mol}$.
+   - For newly nucleating/precipitating minerals ($m_k < 10^{-6}\,\text{mol}$ and $r < 0$): $\text{tol}_k = \text{clamp}(0.005 \cdot |r|, 10^{-11}, 10^{-8})\,\text{mol}$, guaranteeing $< 0.5\%$ relative precision at moving front fringes.
+   - If $\max_k (\varepsilon_k / \text{tol}_k) > 1.0$: Step is rejected and retried with $h_{\text{retry}} = h \cdot \frac{0.8}{\sqrt{\max_k (\varepsilon_k / \text{tol}_k)}}$.
+   - If $\max_k (\varepsilon_k / \text{tol}_k) \le 1.0$: Step is accepted and next step size adapts via $h_{\text{next}} = \min\left(h \cdot \frac{0.9}{\sqrt{\max_k (\varepsilon_k / \text{tol}_k)}}, h_{\max}\right)$.
 
-### 6.3 Physical Boundary Controls
+### 6.3 Physical Boundary & Front Controls
+- **Front Nucleation Step Capping**: When a mineral begins precipitating from near-zero inventory ($m_k < 10^{-6}\,\text{mol}$ and $SR > 1.0$), the local sub-step size is capped to $h \le 1.0\,\text{s}$ to ensure exact early nucleation trajectory without numerical overshoot.
 - **Dissolution Overshoot Rejection**: For $m_k > 10^{-8}\,\text{mol}$, if $k_{1, k} > m_k \times 1.05$, the step is rejected and retried with $h_{\text{exact}} = h \cdot \frac{m_k}{k_{1, k}}$, ensuring exact depletion without premature exhaustion.
 - **Precipitation Capacity Control**: For $SR > 1.0$, $x_{\max} = \min_{e} \frac{T_e}{\nu_{ke}} (1 - 1/SR)$. If $|k_1| > 1.25 x_{\max}$, step is rejected and scaled down.
 - **Quiescent Cell Bypass**: If all kinetic rates $|k_{1, k}| < 10^{-15}$, Stage 2 is completely bypassed, allowing equilibrium cells to double step sizes without extra speciation calls.
